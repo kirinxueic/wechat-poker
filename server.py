@@ -309,8 +309,13 @@ async def handle_message(room: Room, player_id: str, data: dict):
 
     elif action == "allin":
         p = game.get_player(player_id)
-        if p:
-            game.action_raise(player_id, p.chips + p.bet)
+        if p and p.id == (game.current_player().id if game.current_player() else None):
+            total = p.chips + p.bet
+            if total > game.current_bet:
+                game.action_raise(player_id, total)
+            else:
+                # Can't raise, just call (all-in call)
+                game.action_call(player_id)
             await after_action(room)
 
 
