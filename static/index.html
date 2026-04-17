@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🃏 德州扑克</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: linear-gradient(135deg, #0a1628 0%, #1a2744 50%, #0a1628 100%);
+  min-height: 100vh;
+  font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.container {
+  width: 100%;
+  max-width: 460px;
+}
+.logo {
+  text-align: center;
+  margin-bottom: 40px;
+}
+.logo h1 {
+  font-size: 2.8em;
+  font-weight: 900;
+  background: linear-gradient(135deg, #f5c842, #e8a020, #f5c842);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: none;
+  letter-spacing: 2px;
+}
+.logo p { color: #a0b4cc; margin-top: 8px; font-size: 0.95em; }
+.card-deck {
+  font-size: 2.5em;
+  margin-bottom: 10px;
+}
+.panel {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 20px;
+  padding: 30px;
+  backdrop-filter: blur(10px);
+  margin-bottom: 20px;
+}
+.panel h2 {
+  font-size: 1.1em;
+  color: #f5c842;
+  margin-bottom: 20px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.input-group {
+  margin-bottom: 16px;
+}
+.input-group label {
+  display: block;
+  font-size: 0.85em;
+  color: #a0b4cc;
+  margin-bottom: 6px;
+}
+input[type="text"] {
+  width: 100%;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: #fff;
+  font-size: 1em;
+  outline: none;
+  transition: border-color 0.2s;
+}
+input[type="text"]:focus {
+  border-color: #f5c842;
+}
+input[type="text"]::placeholder { color: #556; }
+.btn {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: 12px;
+  font-size: 1.05em;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  letter-spacing: 1px;
+}
+.btn-primary {
+  background: linear-gradient(135deg, #f5c842, #e8a020);
+  color: #1a1a1a;
+}
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(245,200,66,0.4); }
+.btn-secondary {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.2);
+  margin-top: 10px;
+}
+.btn-secondary:hover { background: rgba(255,255,255,0.15); }
+.divider {
+  text-align: center;
+  color: #a0b4cc;
+  font-size: 0.85em;
+  margin: 8px 0;
+}
+.leaderboard-link {
+  text-align: center;
+  margin-top: 10px;
+}
+.leaderboard-link a {
+  color: #f5c842;
+  text-decoration: none;
+  font-size: 0.9em;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="logo">
+    <div class="card-deck">🃏</div>
+    <h1>德州扑克</h1>
+    <p>微信群多人实时对战</p>
+  </div>
+
+  <div class="panel">
+    <h2>🏠 创建或加入</h2>
+    <div class="input-group">
+      <label>你的昵称</label>
+      <input type="text" id="playerName" placeholder="输入昵称" maxlength="12">
+    </div>
+    <button class="btn btn-primary" onclick="createRoom()">✨ 创建房间</button>
+    <div class="divider">── 或 ──</div>
+    <div class="input-group">
+      <label>房间号</label>
+      <input type="text" id="roomCode" placeholder="输入6位房间号" maxlength="8" style="text-transform:uppercase">
+    </div>
+    <button class="btn btn-secondary" onclick="joinRoom()">🚪 加入房间</button>
+  </div>
+
+  <div class="leaderboard-link">
+    <a href="/leaderboard.html">🏆 排行榜</a>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+// Generate or load player ID
+let playerId = localStorage.getItem('poker_player_id');
+if (!playerId) {
+  playerId = 'p_' + Math.random().toString(36).substr(2, 9);
+  localStorage.setItem('poker_player_id', playerId);
+}
+
+// Restore name
+document.getElementById('playerName').value = localStorage.getItem('poker_name') || '';
+
+async function createRoom() {
+  const name = document.getElementById('playerName').value.trim() || '玩家';
+  localStorage.setItem('poker_name', name);
+
+  const res = await fetch(`${API}/api/rooms`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ host_id: playerId, host_name: name })
+  });
+  const data = await res.json();
+  if (data.room_id) {
+    window.location.href = `/game/${data.room_id}?pid=${playerId}&host=1`;
+  }
+}
+
+async function joinRoom() {
+  const name = document.getElementById('playerName').value.trim() || '玩家';
+  const code = document.getElementById('roomCode').value.trim().toUpperCase();
+  if (!code) { alert('请输入房间号'); return; }
+  localStorage.setItem('poker_name', name);
+  window.location.href = `/game/${code}?pid=${playerId}`;
+}
+</script>
+</body>
+</html>

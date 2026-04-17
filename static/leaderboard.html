@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>排行榜 - 德州扑克</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: linear-gradient(135deg, #0a1628, #1a2744);
+  min-height: 100vh;
+  font-family: 'PingFang SC', Arial, sans-serif;
+  color: #fff;
+  padding: 20px;
+}
+.header { text-align: center; margin-bottom: 30px; }
+.header h1 { font-size: 2em; color: #f5c842; }
+.header p { color: #a0b4cc; margin-top: 6px; font-size: 0.9em; }
+.back-btn {
+  display: inline-block;
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 0.85em;
+  margin-bottom: 20px;
+}
+table {
+  width: 100%;
+  max-width: 500px;
+  margin: 0 auto;
+  border-collapse: collapse;
+}
+thead tr { background: rgba(245,200,66,0.15); }
+th { padding: 10px 8px; font-size: 0.85em; color: #f5c842; text-align: left; }
+td { padding: 10px 8px; font-size: 0.9em; border-bottom: 1px solid rgba(255,255,255,0.06); }
+tr:nth-child(1) td:first-child::before { content: '🥇 '; }
+tr:nth-child(2) td:first-child::before { content: '🥈 '; }
+tr:nth-child(3) td:first-child::before { content: '🥉 '; }
+.chips { color: #f5c842; font-weight: 700; }
+</style>
+</head>
+<body>
+<a href="/" class="back-btn">← 返回首页</a>
+<div class="header">
+  <h1>🏆 排行榜</h1>
+  <p>总筹码排名</p>
+</div>
+<table>
+  <thead><tr><th>#</th><th>玩家</th><th>筹码</th><th>局数</th><th>胜率</th></tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+<script>
+fetch('/api/leaderboard').then(r=>r.json()).then(data => {
+  const tb = document.getElementById('tbody');
+  data.forEach((p, i) => {
+    const wr = p.games > 0 ? Math.round(p.wins/p.games*100) : 0;
+    tb.innerHTML += `<tr>
+      <td>${i+1}</td>
+      <td>${p.name}</td>
+      <td class="chips">${p.chips}</td>
+      <td>${p.games}</td>
+      <td>${wr}%</td>
+    </tr>`;
+  });
+});
+</script>
+</body>
+</html>
