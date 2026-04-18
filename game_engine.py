@@ -85,6 +85,7 @@ class Player:
     is_ready: bool = False
     avatar: str = ""
     has_acted: bool = False  # tracks if player acted in current betting round
+    sitting_out: bool = False
 
     def to_dict(self, show_cards=False):
         return {
@@ -96,6 +97,7 @@ class Player:
             "folded": self.folded,
             "all_in": self.all_in,
             "is_ready": self.is_ready,
+            "sitting_out": self.sitting_out,
             "avatar": self.avatar,
             "cards": [c.to_dict() for c in self.hole_cards] if show_cards else (
                 [{"hidden": True} for _ in self.hole_cards]
@@ -206,11 +208,11 @@ class PokerGame:
             p.is_ready = True
 
     def can_start(self) -> bool:
-        active = [p for p in self.players if p.is_ready]
+        active = [p for p in self.players if p.is_ready and not p.sitting_out]
         return len(active) >= 2
 
     def start_hand(self) -> bool:
-        active = [p for p in self.players if p.chips > 0]
+        active = [p for p in self.players if p.chips > 0 and not p.sitting_out]
         if len(active) < 2:
             return False
 
@@ -219,7 +221,7 @@ class PokerGame:
             p.hole_cards = []
             p.bet = 0
             p.total_bet = 0
-            p.folded = p.chips == 0
+            p.folded = p.chips == 0 or p.sitting_out
             p.all_in = False
             p.has_acted = False
 
@@ -236,7 +238,7 @@ class PokerGame:
         n = len(self.players)
         self.dealer_idx = (self.dealer_idx + 1) % n
         attempts = 0
-        while self.players[self.dealer_idx].chips == 0:
+        while self.players[self.dealer_idx].chips == 0 or self.players[self.dealer_idx].sitting_out:
             self.dealer_idx = (self.dealer_idx + 1) % n
             attempts += 1
             if attempts >= n:
@@ -580,6 +582,16 @@ class PokerGame:
 
     def get_state(self, viewer_id: str = None) -> dict:
         cur = self.current_player()
+        # Build side pot display info
+        side_pots_display = []
+        if self.side_pots:
+            for sp in self.side_pots:
+                side_pots_display.append({
+                    "amount": sp.get("amount", 0),
+                    "eligible": [p.get("name", "") for p in sp.get("eligible", [])]
+                    if sp.get("eligible") and isinstance(sp["eligible"][0], dict)
+                    else []
+                })
         return {
             "room_id": self.room_id,
             "phase": self.phase.value,
@@ -596,4 +608,6 @@ class PokerGame:
             "hand_history": self.hand_history[-10:],
             "small_blind": self.small_blind,
             "big_blind": self.big_blind,
+            "side_pots": side_pots_display,
+            "active_count": len([p for p in self.players if not p.folded and not p.sitting_out]),
         }

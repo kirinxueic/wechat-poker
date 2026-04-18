@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>筹码记录</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a1628; color: #fff; font-family: 'PingFang SC', Arial, sans-serif; padding: 16px; }
+h1 { color: #f5c842; font-size: 1.2em; margin-bottom: 4px; }
+.subtitle { color: #a0b4cc; font-size: 0.85em; margin-bottom: 16px; }
+.section-title { color: #f5c842; font-size: 0.95em; font-weight: 700; margin: 16px 0 8px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px; }
+.snap-card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; }
+.snap-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.snap-hand { font-weight: 700; color: #f5c842; }
+.snap-time { font-size: 0.75em; color: #a0b4cc; }
+.player-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.9em; }
+.player-row:last-child { border-bottom: none; }
+.chips { color: #4ec860; font-weight: 700; }
+.back-btn { display: inline-block; margin-bottom: 16px; background: rgba(255,255,255,0.1); color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 0.9em; }
+.current-badge { background: rgba(60,200,80,0.2); color: #4ec860; font-size: 0.7em; padding: 2px 6px; border-radius: 8px; margin-left: 6px; }
+.empty { color: #a0b4cc; text-align: center; padding: 32px; }
+</style>
+</head>
+<body>
+<a href="javascript:history.back()" class="back-btn">← 返回</a>
+<h1>📊 筹码记录</h1>
+<div class="subtitle" id="roomTitle">加载中...</div>
+
+<div class="section-title">当前筹码状态</div>
+<div id="currentDiv"></div>
+
+<div class="section-title">历史快照</div>
+<div id="snapshotsDiv"></div>
+
+<script>
+const ROOM_ID = location.pathname.split('/').pop();
+document.getElementById('roomTitle').textContent = `房间：${ROOM_ID}`;
+
+async function load() {
+  const res = await fetch(`/api/rooms/${ROOM_ID}/snapshot`);
+  const data = await res.json();
+
+  // Current
+  const cur = document.getElementById('currentDiv');
+  if (data.current && data.current.length) {
+    const sorted = [...data.current].sort((a,b) => b.chips - a.chips);
+    cur.innerHTML = `<div class="snap-card">${sorted.map(p =>
+      `<div class="player-row"><span>${p.name}${p.sitting_out ? ' 🚶' : ''}</span><span class="chips">${p.chips} 💰</span></div>`
+    ).join('')}</div>`;
+  } else {
+    cur.innerHTML = '<div class="empty">暂无数据（游戏未开始）</div>';
+  }
+
+  // Snapshots
+  const div = document.getElementById('snapshotsDiv');
+  if (!data.snapshots || data.snapshots.length === 0) {
+    div.innerHTML = '<div class="empty">还没有历史记录（每局结束后自动保存）</div>';
+    return;
+  }
+  div.innerHTML = data.snapshots.map(snap => {
+    const sorted = [...snap.players].sort((a,b) => b.chips - a.chips);
+    const timeStr = snap.time ? snap.time.replace('T',' ').slice(0,19) : '';
+    return `<div class="snap-card">
+      <div class="snap-header">
+        <span class="snap-hand">第${snap.hand}局后</span>
+        <span class="snap-time">${timeStr}</span>
+      </div>
+      ${sorted.map(p =>
+        `<div class="player-row"><span>${p.name}</span><span class="chips">${p.chips} 💰</span></div>`
+      ).join('')}
+    </div>`;
+  }).join('');
+}
+
+load();
+setInterval(load, 10000); // Auto refresh every 10s
+</script>
+</body>
+</html>

@@ -7,12 +7,12 @@ import asyncio
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Set, Optional
-from contextlib import asynccontextmanager
+from typing import Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
+from contextlib import asynccontextmanager
 
 from game_engine import PokerGame, GamePhase
 
@@ -27,7 +27,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS players (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            total_chips INTEGER DEFAULT 0,
+            total_chips INTEGER DEFAULT 1000,
             games_played INTEGER DEFAULT 0,
             games_won INTEGER DEFAULT 0,
             chips_won INTEGER DEFAULT 0,
@@ -47,6 +47,15 @@ def init_db():
             played_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS chip_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id TEXT,
+            hand_num INTEGER DEFAULT 0,
+            snapshot_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -61,7 +70,6 @@ def upsert_player(player_id: str, name: str, starting_chips: int = 1000):
             last_seen=excluded.last_seen
     """, (player_id, name, starting_chips, datetime.now().isoformat()))
     conn.commit()
-    # Get current chips
     c.execute("SELECT total_chips FROM players WHERE id=?", (player_id,))
     row = c.fetchone()
     conn.close()
@@ -74,6 +82,14 @@ def get_player_chips(player_id: str) -> int:
     row = c.fetchone()
     conn.close()
     return row[0] if row else 1000
+
+def save_player_chips(player_id: str, chips: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE players SET total_chips=?, last_seen=? WHERE id=?",
+              (chips, datetime.now().isoformat(), player_id))
+    conn.commit()
+    conn.close()
 
 def update_player_stats(player_id: str, chips_delta: int, won: bool):
     conn = sqlite3.connect(DB_PATH)
@@ -122,16 +138,40 @@ def record_game(room_id: str, winner_id: str, winner_name: str, chips_won: int, 
     conn.commit()
     conn.close()
 
-# ─── Room Manager ───────────────────────────────────────────────────────────
+def save_chip_snapshot(room_id: str, hand_num: int, players_data: list):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO chip_snapshots (room_id, hand_num, snapshot_json, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (room_id, hand_num, json.dumps(players_data, ensure_ascii=False),
+          datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_chip_snapshots(room_id: str, limit=20):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT hand_num, snapshot_json, created_at FROM chip_snapshots
+        WHERE room_id=? ORDER BY id DESC LIMIT ?
+    """, (room_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [{"hand": r[0], "players": json.loads(r[1]), "time": r[2]} for r in rows]
+
+# ─── Room ───────────────────────────────────────────────────────────────────
 
 class Room:
     def __init__(self, room_id: str, host_id: str, small_blind=10, big_blind=20):
         self.room_id = room_id
         self.host_id = host_id
         self.game = PokerGame(room_id, small_blind, big_blind)
-        self.connections: Dict[str, WebSocket] = {}  # player_id -> websocket
+        self.connections: Dict[str, WebSocket] = {}
         self.player_names: Dict[str, str] = {}
         self.game_started = False
+        self.hand_count = 0
+        self.action_timers: Dict[str, asyncio.Task] = {}  # action timeout timers
 
     async def broadcast(self, message: dict, exclude_id: str = None):
         for pid, ws in list(self.connections.items()):
@@ -142,7 +182,6 @@ class Room:
                     pass
 
     async def send_state(self):
-        """Send personalized game state to each player."""
         for pid, ws in list(self.connections.items()):
             try:
                 state = self.game.get_state(viewer_id=pid)
@@ -158,6 +197,10 @@ class Room:
             except:
                 pass
 
+    def cancel_action_timer(self):
+        for task in self.action_timers.values():
+            task.cancel()
+        self.action_timers.clear()
 
 rooms: Dict[str, Room] = {}
 
@@ -170,9 +213,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, title="Texas Hold'em Poker")
 
-# Serve static files
 static_dir = Path("static")
 static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 async def index():
@@ -181,6 +224,10 @@ async def index():
 @app.get("/game/{room_id}")
 async def game_page(room_id: str):
     return FileResponse("static/game.html")
+
+@app.get("/snapshot/{room_id}")
+async def snapshot_page(room_id: str):
+    return FileResponse("static/snapshot.html")
 
 @app.post("/api/rooms")
 async def create_room(body: dict):
@@ -218,6 +265,17 @@ async def get_room(room_id: str):
         "phase": room.game.phase.value,
     }
 
+@app.get("/api/rooms/{room_id}/snapshot")
+async def room_snapshot(room_id: str):
+    snapshots = get_chip_snapshots(room_id)
+    # Also include current in-memory chips
+    room = rooms.get(room_id)
+    current = []
+    if room:
+        current = [{"name": p.name, "chips": p.chips, "sitting_out": p.sitting_out}
+                   for p in room.game.players]
+    return {"snapshots": snapshots, "current": current}
+
 # ─── WebSocket ──────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/{room_id}/{player_id}")
@@ -230,23 +288,31 @@ async def websocket_endpoint(ws: WebSocket, room_id: str, player_id: str):
         await ws.close()
         return
 
-    # Register connection
+    # Reconnect or new join
+    is_reconnect = player_id in room.player_names
     room.connections[player_id] = ws
+
     player = room.game.get_player(player_id)
     if not player:
-        # New player joining via link
-        name = room.player_names.get(player_id, f"玩家{len(room.connections)}")
+        # Brand new player
+        name = room.player_names.get(player_id, f"玩家{len(room.game.players)+1}")
         chips = get_player_chips(player_id)
         if chips < room.game.big_blind * 2:
-            chips = 1000  # Rebuy
+            chips = 1000
         room.game.add_player(player_id, name, chips)
         player = room.game.get_player(player_id)
+    else:
+        # Reconnect: restore chips from DB (already in player object since we keep game state)
+        # If game is in progress, sit them out so they don't disrupt current hand
+        if room.game.phase not in (GamePhase.WAITING, GamePhase.SHOWDOWN):
+            player.sitting_out = True
 
+    join_msg = "重新连接" if is_reconnect else "进入房间"
     await room.broadcast({
         "type": "player_joined",
         "player_id": player_id,
         "name": player.name if player else "Unknown",
-        "msg": f"{player.name if player else 'Unknown'} 进入房间"
+        "msg": f"{player.name if player else 'Unknown'} {join_msg}"
     })
     await room.send_state()
 
@@ -255,11 +321,15 @@ async def websocket_endpoint(ws: WebSocket, room_id: str, player_id: str):
             data = await ws.receive_json()
             await handle_message(room, player_id, data)
     except WebSocketDisconnect:
+        # Save chips to DB on disconnect
+        p = room.game.get_player(player_id)
+        if p:
+            save_player_chips(player_id, p.chips)
         del room.connections[player_id]
         await room.broadcast({
             "type": "player_left",
             "player_id": player_id,
-            "msg": f"{room.player_names.get(player_id, '玩家')} 离开房间"
+            "msg": f"{room.player_names.get(player_id, '玩家')} 断线"
         })
         await room.send_state()
 
@@ -280,50 +350,111 @@ async def handle_message(room: Room, player_id: str, data: dict):
         await room.send_state()
 
     elif action == "ready":
-        game.set_ready(player_id)
-        await room.broadcast({"type": "system", "msg": f"{room.player_names.get(player_id,'玩家')} 准备好了"})
-        if game.can_start() and not room.game_started:
-            await asyncio.sleep(1)
-            await start_hand(room)
+        p = game.get_player(player_id)
+        if p and not p.sitting_out:
+            game.set_ready(player_id)
+            await room.broadcast({"type": "system", "msg": f"{room.player_names.get(player_id,'玩家')} 准备好了"})
+            if game.can_start() and not room.game_started:
+                await asyncio.sleep(1)
+                await start_hand(room)
 
     elif action == "start":
         if player_id == room.host_id:
             await start_hand(room)
 
+    elif action == "stand_up":
+        p = game.get_player(player_id)
+        if p and not p.sitting_out:
+            p.sitting_out = True
+            p.is_ready = False
+            await room.broadcast({"type": "system", "msg": f"🚶 {p.name} 暂时离席"})
+            await room.send_state()
+
+    elif action == "sit_down":
+        p = game.get_player(player_id)
+        if p and p.sitting_out:
+            p.sitting_out = False
+            await room.broadcast({"type": "system", "msg": f"👋 {p.name} 回到座位"})
+            await room.send_state()
+
+    elif action == "leave_room":
+        # Graceful leave: save chips, remove from game
+        p = game.get_player(player_id)
+        name = room.player_names.get(player_id, "玩家")
+        if p:
+            save_player_chips(player_id, p.chips)
+            game.remove_player(player_id)
+        ws = room.connections.pop(player_id, None)
+        # Transfer host if needed
+        if player_id == room.host_id and room.connections:
+            room.host_id = next(iter(room.connections))
+        await room.broadcast({"type": "player_left", "player_id": player_id,
+                               "msg": f"🚪 {name} 离开了房间"})
+        await room.send_state()
+        if ws:
+            try:
+                await ws.close()
+            except:
+                pass
+
     elif action == "fold":
+        room.cancel_action_timer()
         if game.action_fold(player_id):
             await after_action(room)
 
     elif action == "check":
+        room.cancel_action_timer()
         if game.action_check(player_id):
             await after_action(room)
 
     elif action == "call":
+        room.cancel_action_timer()
         if game.action_call(player_id):
             await after_action(room)
 
     elif action == "raise":
+        room.cancel_action_timer()
         amount = int(data.get("amount", game.current_bet * 2))
         if game.action_raise(player_id, amount):
             await after_action(room)
 
     elif action == "allin":
+        room.cancel_action_timer()
         p = game.get_player(player_id)
-        if p and p.id == (game.current_player().id if game.current_player() else None):
+        cur = game.current_player()
+        if p and cur and p.id == cur.id:
             total = p.chips + p.bet
             if total > game.current_bet:
                 game.action_raise(player_id, total)
             else:
-                # Can't raise, just call (all-in call)
                 game.action_call(player_id)
             await after_action(room)
+
+
+async def start_action_timer(room: Room, player_id: str, timeout: int = 30):
+    """Auto-fold if player doesn't act within timeout seconds."""
+    await asyncio.sleep(timeout)
+    p = room.game.get_player(player_id)
+    cur = room.game.current_player()
+    if p and cur and p.id == cur.id and room.game.phase not in (GamePhase.WAITING, GamePhase.SHOWDOWN):
+        # Auto check if possible, else fold
+        if not room.game.action_check(player_id):
+            room.game.action_fold(player_id)
+        await room.broadcast({"type": "system", "msg": f"⏰ {p.name} 超时自动行动"})
+        await after_action(room)
 
 
 async def start_hand(room: Room):
     room.game_started = True
     if room.game.start_hand():
-        await room.broadcast({"type": "system", "msg": "🃏 新一局开始！"})
+        room.hand_count += 1
+        await room.broadcast({"type": "system", "msg": f"🃏 第{room.hand_count}局开始！"})
         await room.send_state()
+        # Start action timer for first player
+        cur = room.game.current_player()
+        if cur:
+            task = asyncio.create_task(start_action_timer(room, cur.id))
+            room.action_timers[cur.id] = task
     else:
         await room.broadcast({"type": "error", "msg": "玩家不足，无法开始"})
 
@@ -332,14 +463,31 @@ async def after_action(room: Room):
     game = room.game
     await room.send_state()
 
+    # Start timer for next player
+    room.cancel_action_timer()
+    if game.phase not in (GamePhase.WAITING, GamePhase.SHOWDOWN):
+        cur = game.current_player()
+        if cur:
+            task = asyncio.create_task(start_action_timer(room, cur.id))
+            room.action_timers[cur.id] = task
+
     if game.phase == GamePhase.SHOWDOWN:
-        # Update stats
+        room.cancel_action_timer()
         winner_ids = {w["id"] for w in game.winners}
-        player_chips_before = {p.id: p.chips - sum(w["gain"] for w in game.winners if w["id"] == p.id) for p in game.players}
 
         for w in game.winners:
             update_player_stats(w["id"], w["gain"], True)
             record_game(game.room_id, w["id"], w["name"], w["gain"], w.get("hand", ""))
+
+        # Save chip snapshot after each hand
+        snapshot_data = [
+            {"name": p.name, "chips": p.chips, "id": p.id}
+            for p in game.players
+        ]
+        save_chip_snapshot(room.room_id, room.hand_count, snapshot_data)
+        # Also persist chips to DB
+        for p in game.players:
+            save_player_chips(p.id, p.chips)
 
         await room.broadcast({
             "type": "showdown",
@@ -347,18 +495,18 @@ async def after_action(room: Room):
             "history": game.hand_history[-15:],
         })
 
-        # Auto restart after delay
         await asyncio.sleep(5)
-        # Remove busted players
+
+        # Rebuy busted players
         for p in list(game.players):
-            if p.chips == 0:
-                # Give them chips to rebuy
-                chips = 1000
-                p.chips = chips
+            if p.chips == 0 and not p.sitting_out:
+                p.chips = 1000
+                await room.broadcast({"type": "system", "msg": f"💰 {p.name} 补充筹码至1000"})
 
         room.game_started = False
-        # Prompt ready again
         for p in game.players:
             p.is_ready = False
         await room.send_state()
         await room.broadcast({"type": "system", "msg": "⏳ 等待玩家准备下一局..."})
+        await asyncio.sleep(1)
+        await room.send_state()
